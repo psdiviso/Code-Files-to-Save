@@ -1,0 +1,35 @@
+using System;
+using System.Reflection;
+
+namespace Diviso.Database.Attributes;
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = false, Inherited = true)]
+public class DbTableInfo : Attribute
+{
+    public string Name { get; set; }
+
+    public DbTableInfo()
+    {
+    }
+
+    public DbTableInfo(string name)
+    {
+        Name = name;
+    }
+
+    public static string GetTableName<T>()
+    {
+        return GetTableName(typeof(T));
+    }
+
+    public static string GetTableName(Type type)
+    {
+        DbTableInfo customAttribute = type.GetCustomAttribute<DbTableInfo>(inherit: true);
+        if (customAttribute == null || string.IsNullOrWhiteSpace(customAttribute.Name))
+        {
+            return DbContext.DefaultTableNamePrefix + type.Name + DbContext.DefaultTableNameSurfix;
+        }
+
+        return customAttribute.Name;
+    }
+}
