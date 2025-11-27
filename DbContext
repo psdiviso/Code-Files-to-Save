@@ -1,0 +1,1047 @@
+#region Assembly Diviso.Core.DBContext, Version=0.0.1.0, Culture=neutral, PublicKeyToken=null
+// C:\Users\PatrickStruckmann\.nuget\packages\diviso.core.dbcontext\0.0.1\lib\net6.0\Diviso.Core.DBContext.dll
+// Decompiled with ICSharpCode.Decompiler 8.2.0.7535
+#endregion
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Text;
+using System.Threading.Tasks;
+using Diviso.Database.Attributes;
+using Diviso.Database.Extensions;
+
+namespace Diviso.Database;
+
+public class DbContext : IDisposable
+{
+    public bool IsDebug { get; set; }
+
+    public static string DefaultConnectionString { get; set; } = null;
+
+
+    public static string DefaultTableNamePrefix { get; set; } = string.Empty;
+
+
+    public static string DefaultTableNameSurfix { get; set; } = string.Empty;
+
+
+    public static bool AutoCommitOnDispose { get; set; } = true;
+
+
+    public SqlConnection Connection { get; protected set; }
+
+    public string TableNamePrefix { get; set; } = DefaultTableNamePrefix;
+
+
+    public string TableNameSurfix { get; set; } = DefaultTableNameSurfix;
+
+
+    public SqlTransaction Transaction { get; protected set; }
+
+    public bool CommitOnDispose { get; set; }
+
+    public string LastExecutedQuery { get; set; }
+
+    private SqlCommand command { get; set; }
+
+    public DbContext(bool useTransaction = true, bool? commitOnDispose = null)
+        : this(DefaultConnectionString, useTransaction, commitOnDispose)
+    {
+    }
+
+    public DbContext(string connectionString, bool useTransaction = true, bool? commitOnDispose = null)
+        : this(new SqlConnection(connectionString), useTransaction, commitOnDispose)
+    {
+    }
+
+    public DbContext(SqlConnection Connection, bool useTransaction = true, bool? commitOnDispose = null)
+    {
+        this.Connection = Connection;
+        if (Connection.State == ConnectionState.Closed)
+        {
+            Connection.Open();
+        }
+
+        command = new SqlCommand(string.Empty, Connection);
+        CommitOnDispose = commitOnDispose ?? AutoCommitOnDispose;
+        if (useTransaction)
+        {
+            Transaction = (command.Transaction = Connection.BeginTransaction());
+        }
+    }
+
+    public void Commit()
+    {
+        Transaction.Commit();
+    }
+
+    public void Rollback()
+    {
+        Transaction.Rollback();
+    }
+
+    public T InsertOrUpdate<T>(T value)
+    {
+        if (value == null)
+        {
+            throw new ArgumentNullException("value");
+        }
+
+        Dictionary<MemberInfo, DbPrimaryKey> primaryKeys = getPrimaryKeys(typeof(T));
+        if (primaryKeys.Count == 0)
+        {
+            Insert<T>(value);
+            return value;
+        }
+
+        StringBuilder stringBuilder = new StringBuilder();
+        object[] array = new object[primaryKeys.Count];
+        for (int i = 0; i < primaryKeys.Count; i++)
+        {
+            KeyValuePair<MemberInfo, DbPrimaryKey> keyValuePair = primaryKeys.ElementAt(i);
+            if (i != 0)
+            {
+                stringBuilder.Append(" AND ");
+            }
+
+            array[i] = keyValuePair.Key.GetValue(value);
+            stringBuilder.Append($"[{DbColumnInfo.GetColumnName(keyValuePair.Key)}] = @{i}");
+        }
+
+        string commandText = $"SELECT COUNT(*) FROM {DbTableInfo.GetTableName<T>()} WHERE {stringBuilder.ToString()}";
+        if (array.Count((object x) => x == null) != 0)
+        {
+            Insert<T>(value);
+            return value;
+        }
+
+        switch (ExecuteScalar<int>(commandText, array))
+        {
+            case 0:
+                Insert<T>(value);
+                break;
+            case 1:
+                Update(value);
+                break;
+        }
+
+        return value;
+    }
+
+    public Task InsertAsync<T>(IEnumerable<T> objects)
+    {
+        return Task.Run(delegate
+        {
+            Insert(objects);
+        });
+    }
+
+    public Task InsertAsync<T>(params T[] objects)
+    {
+        return Task.Run(delegate
+        {
+            Insert(objects);
+        });
+    }
+
+    public void Insert<T>(IEnumerable<T> objects)
+    {
+        Insert(objects.ToArray());
+    }
+
+    public void Insert<T>(params T[] objects)
+    {
+        try
+        {
+            if (objects == null || objects.Length == 0)
+            {
+                return;
+            }
+
+            Type typeFromHandle = typeof(T);
+            IEnumerable<MemberInfo> enumerable = from x in getPrimaryKeys(typeFromHandle)
+                                                 where x.Value.AutoIncrement || !objects.Any((T obj) => x.Key.GetValue(obj) != null)
+                                                 select x.Key;
+            Dictionary<MemberInfo, DbColumnInfo> columnInfo = getColumnInfo(typeFromHandle, includeDbIngore: false);
+            Dictionary<MemberInfo, DbColumnInfo> dictionary = columnInfo.ToDictionary((KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Key, (KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Value);
+            foreach (MemberInfo item in enumerable)
+            {
+                dictionary.Remove(item);
+            }
+
+            SqlCommand sqlCommand = getCommand(string.Format("INSERT INTO [{0}] ([{1}]) OUTPUT INSERTED.[{2}] VALUES (@{3})", DbTableInfo.GetTableName(typeFromHandle), string.Join("],[", dictionary.Select((KeyValuePair<MemberInfo, DbColumnInfo> prop) => prop.Value.Name ?? prop.Key.Name)), string.Join("], INSERTED.[", columnInfo.Select((KeyValuePair<MemberInfo, DbColumnInfo> prop) => prop.Value.Name ?? prop.Key.Name)), string.Join(",@", dictionary.Select((KeyValuePair<MemberInfo, DbColumnInfo> prop) => prop.Value.Name ?? prop.Key.Name))));
+            for (int i = 0; i < objects.Length; i++)
+            {
+                sqlCommand.Parameters.Clear();
+                foreach (KeyValuePair<MemberInfo, DbColumnInfo> item2 in columnInfo)
+                {
+                    string parameterName = "@" + item2.Value.Name;
+                    object obj2 = item2.Key.GetValue(objects.ElementAt(i));
+                    if (item2.Value.ValueConverterInstance != null)
+                    {
+                        obj2 = item2.Value.ValueConverterInstance.ConvertBack(obj2);
+                    }
+
+                    sqlCommand.Parameters.AddWithValue(parameterName, obj2 ?? DBNull.Value);
+                }
+
+                parseForSQL(sqlCommand, objects.ElementAt(i));
+            }
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, command);
+        }
+    }
+
+    public Task DeleteAsync<T>(IEnumerable<T> objects)
+    {
+        return Task.Run(delegate
+        {
+            Delete(objects);
+        });
+    }
+
+    public Task DeleteAsync<T>(params T[] objects)
+    {
+        return Task.Run(delegate
+        {
+            Delete(objects);
+        });
+    }
+
+    public void Delete<T>(IEnumerable<T> objects)
+    {
+        Delete(objects.ToArray());
+    }
+
+    public void Delete<T>(params T[] objects)
+    {
+        try
+        {
+            if (objects == null || objects.Length == 0)
+            {
+                return;
+            }
+
+            Type enumerableType = getEnumerableType(typeof(T));
+            Dictionary<MemberInfo, DbColumnInfo> columnInfo = getColumnInfo(enumerableType, includeDbIngore: false);
+            Dictionary<MemberInfo, DbPrimaryKey> primaryKeys = getPrimaryKeys(enumerableType);
+            StringBuilder stringBuilder = new StringBuilder($"DELETE FROM [{DbTableInfo.GetTableName(enumerableType)}]");
+            stringBuilder.Append(" WHERE ");
+            for (int i = 0; i < primaryKeys.Count(); i++)
+            {
+                if (i != 0)
+                {
+                    stringBuilder.Append(" AND ");
+                }
+
+                stringBuilder.AppendFormat("[{0}] = @{1}", columnInfo.Keys.ElementAt(i).Name, columnInfo.Values.ElementAt(i).Name);
+            }
+
+            SqlCommand sqlCommand = getCommand(stringBuilder.ToString());
+            for (int j = 0; j < objects.Length; j++)
+            {
+                sqlCommand.Parameters.Clear();
+                foreach (KeyValuePair<MemberInfo, DbColumnInfo> item in columnInfo)
+                {
+                    string parameterName = "@" + item.Value.Name;
+                    object value = item.Key.GetValue(objects.ElementAt(j));
+                    if (item.Value.ValueConverterInstance != null)
+                    {
+                        item.Value.ValueConverterInstance.ConvertBack(value);
+                    }
+
+                    sqlCommand.Parameters.AddWithValue(parameterName, value ?? DBNull.Value);
+                }
+
+                sqlCommand.ExecuteNonQuery();
+            }
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, command);
+        }
+    }
+
+    public Task UpdateAsync<T>(IEnumerable<T> objects)
+    {
+        return Task.Run(delegate
+        {
+            Update(objects);
+        });
+    }
+
+    public Task UpdateAsync<T>(params T[] objects)
+    {
+        return Task.Run(delegate
+        {
+            Update(objects);
+        });
+    }
+
+    public void Update<T>(IEnumerable<T> objects)
+    {
+        Update(objects.ToArray());
+    }
+
+    public void Update<T>(params T[] objects)
+    {
+        Update(objects, new Expression<Func<T, object>>[0]);
+    }
+
+    public void Update<T>(T objects, params Expression<Func<T, object>>[] modifiedFields)
+    {
+        Update(new T[1] { objects }, modifiedFields);
+    }
+
+    public void Update<T>(T[] objects, params Expression<Func<T, object>>[] modifiedFields)
+    {
+        try
+        {
+            if (objects == null || objects.Length == 0)
+            {
+                return;
+            }
+
+            Dictionary<MemberInfo, DbColumnInfo> propAliases;
+            string commandText = buildUpdateCommand(out propAliases, modifiedFields);
+            SqlCommand sqlCommand = getCommand(commandText);
+            for (int i = 0; i < objects.Length; i++)
+            {
+                sqlCommand.Parameters.Clear();
+                foreach (KeyValuePair<MemberInfo, DbColumnInfo> item in propAliases)
+                {
+                    string parameterName = "@" + item.Value.Name;
+                    object obj = item.Key.GetValue(objects.ElementAt(i));
+                    if (item.Value.ValueConverterInstance != null)
+                    {
+                        obj = item.Value.ValueConverterInstance.ConvertBack(obj);
+                    }
+
+                    sqlCommand.Parameters.AddWithValue(parameterName, obj ?? DBNull.Value);
+                }
+
+                ParseResult<T>(sqlCommand);
+            }
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, command);
+        }
+    }
+
+    public static PropertyInfo GetPropertyInfo<TSource, TProperty>(Expression<Func<TSource, TProperty>> propertyLambda)
+    {
+        Type typeFromHandle = typeof(TSource);
+        PropertyInfo propertyInfo = ((propertyLambda.Body as MemberExpression) ?? throw new ArgumentException($"Expression '{propertyLambda.ToString()}' refers to a method, not a property.")).Member as PropertyInfo;
+        if (propertyInfo == null)
+        {
+            throw new ArgumentException($"Expression '{propertyLambda.ToString()}' refers to a field, not a property.");
+        }
+
+        if (typeFromHandle != propertyInfo.ReflectedType && !typeFromHandle.IsSubclassOf(propertyInfo.ReflectedType))
+        {
+            throw new ArgumentException($"Expression '{propertyLambda.ToString()}' refers to a property that is not from type {typeFromHandle}.");
+        }
+
+        return propertyInfo;
+    }
+
+    internal static string buildUpdateCommand<T>(out Dictionary<MemberInfo, DbColumnInfo> propAliases, params Expression<Func<T, object>>[] modifiedFields)
+    {
+        Type enumerableType = getEnumerableType(typeof(T));
+        propAliases = getColumnInfo(enumerableType, includeDbIngore: false);
+        Dictionary<MemberInfo, DbPrimaryKey> primaryKeys = getPrimaryKeys(enumerableType);
+        if (modifiedFields != null && modifiedFields.Length != 0)
+        {
+            List<MemberInfo> modified = new List<MemberInfo>();
+            for (int i = 0; i < modifiedFields.Length; i++)
+            {
+                PropertyInfo propertyInfo = GetPropertyInfo(modifiedFields[i]);
+                modified.Add(propertyInfo);
+            }
+
+            propAliases = propAliases.Where((KeyValuePair<MemberInfo, DbColumnInfo> x) => primaryKeys.ContainsKey(x.Key) || modified.Contains(x.Key)).ToDictionary((KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Key, (KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Value);
+        }
+
+        StringBuilder stringBuilder = new StringBuilder("UPDATE [" + DbTableInfo.GetTableName(enumerableType) + "] SET ");
+        bool flag = true;
+        for (int j = 0; j < propAliases.Count(); j++)
+        {
+            KeyValuePair<MemberInfo, DbColumnInfo> keyValuePair = propAliases.ElementAt(j);
+            if (!primaryKeys.TryGetValue(keyValuePair.Key, out var value) || !value.AutoIncrement)
+            {
+                if (!flag)
+                {
+                    stringBuilder.Append(",");
+                }
+
+                flag = false;
+                stringBuilder.AppendFormat("[{0}] = @{1}", keyValuePair.Value.Name ?? keyValuePair.Key.Name, keyValuePair.Value.Name);
+            }
+        }
+
+        stringBuilder.Append(" WHERE ");
+        for (int k = 0; k < primaryKeys.Count(); k++)
+        {
+            if (k != 0)
+            {
+                stringBuilder.Append(" AND ");
+            }
+
+            MemberInfo memberInfo = primaryKeys.Keys.ElementAt(k);
+            stringBuilder.AppendFormat("[{0}] = @{1}", memberInfo.Name, propAliases[memberInfo].Name);
+        }
+
+        return stringBuilder.ToString();
+    }
+
+    public int Count<T>()
+    {
+        return Count<T>("1 = 1", Array.Empty<object>());
+    }
+
+    public int Count<T>(string where, params object[] parameters)
+    {
+        Type enumerableType = getEnumerableType(typeof(T));
+        string commandText = string.Format("SELECT COUNT(*) FROM [{0}] {1}", DbTableInfo.GetTableName(enumerableType), string.IsNullOrWhiteSpace(where) ? string.Empty : ("WHERE " + where));
+        return ExecuteScalar<int>(commandText, parameters);
+    }
+
+    public IEnumerable<T> Select<T>()
+    {
+        return Select<T>(string.Empty, Array.Empty<object>());
+    }
+
+    public IEnumerable<T> Select<T>(string where, params object[] parameters)
+    {
+        return ParseResult<T>(buildSelectQuery<T>("SELECT", where, parameters));
+    }
+
+    public IEnumerable<T> Select<T>(int top, string where, params object[] parameters)
+    {
+        return ParseResult<T>(buildSelectQuery<T>("SELECT TOP " + top, where, parameters));
+    }
+
+    private SqlCommand buildSelectQuery<T>(string prefix, string where, params object[] parameters)
+    {
+        string tableName = DbTableInfo.GetTableName(getEnumerableType(typeof(T)));
+        string text = prefix;
+        text += (string.IsNullOrWhiteSpace(where) ? ("* FROM " + tableName + " ") : ("* FROM " + tableName + " WHERE" + where));
+        return getCommand(text, parameters);
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(int pageSize, int pageNumber, string orderBy)
+    {
+        return SelectPaginated<T>("*", DbTableInfo.GetTableName<T>(), pageSize, pageNumber, orderBy, "1 = 1", Array.Empty<object>());
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(int pageSize, int pageNumber, string orderBy, string where, params object[] parameters)
+    {
+        return SelectPaginated<T>("*", DbTableInfo.GetTableName<T>(), pageSize, pageNumber, orderBy, where, parameters);
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(string select, int PageSize, int PageNumber, string orderBy)
+    {
+        return SelectPaginated<T>(select, DbTableInfo.GetTableName<T>(), PageSize, PageNumber, orderBy, "1 = 1", Array.Empty<object>());
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(string select, int PageSize, int PageNumber, string orderBy, string where, params object[] parameters)
+    {
+        return SelectPaginated<T>(select, DbTableInfo.GetTableName<T>(), PageSize, PageNumber, orderBy, where, parameters);
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(string select, string tables, int PageSize, int PageNumber, string orderBy)
+    {
+        return SelectPaginated<T>(select, tables, PageSize, PageNumber, orderBy, "1 = 1", Array.Empty<object>());
+    }
+
+    public PaginationResponse<T> SelectPaginated<T>(string select, string tables, int pageSize, int pageNumber, string orderBy, string where, params object[] parameters)
+    {
+        int skip = pageNumber * pageSize - pageSize;
+        int totalItemCount;
+        return new PaginationResponse<T>(Select<T>(select, tables, skip, pageSize, orderBy, out totalItemCount, where, parameters), totalItemCount, pageNumber, pageSize);
+    }
+
+    public IEnumerable<T> Select<T>(int skip, int take, string orderBy)
+    {
+        return Select<T>("*", skip, take, orderBy, "1 = 1", Array.Empty<object>());
+    }
+
+    public IEnumerable<T> Select<T>(int skip, int take, string orderBy, string where, params object[] parameters)
+    {
+        return Select<T>("*", skip, take, orderBy, where, parameters);
+    }
+
+    public IEnumerable<T> Select<T>(int skip, int take, string orderBy, out int totalItemCount)
+    {
+        return Select<T>("*", skip, take, orderBy, out totalItemCount, "1 = 1", Array.Empty<object>());
+    }
+
+    public IEnumerable<T> Select<T>(int skip, int take, string orderBy, out int totalItemCount, string where, params object[] parameters)
+    {
+        return Select<T>("*", skip, take, orderBy, out totalItemCount, where, parameters);
+    }
+
+    public IEnumerable<T> Select<T>(string select, int skip, int take, string orderBy)
+    {
+        return Select<T>(select, skip, take, orderBy, "1 = 1", Array.Empty<object>());
+    }
+
+    public IEnumerable<T> Select<T>(string select, int skip, int take, string orderBy, out int totalItemCount)
+    {
+        return Select<T>(select, skip, take, orderBy, out totalItemCount, "1 = 1", Array.Empty<object>());
+    }
+
+    public IEnumerable<T> Select<T>(string select, int skip, int take, string orderBy, string where, params object[] parameters)
+    {
+        return Select<T>(select, "[" + DbTableInfo.GetTableName<T>() + "]", skip, take, orderBy, where, parameters);
+    }
+
+    public IEnumerable<T> Select<T>(string select, int skip, int take, string orderBy, out int totalItemCount, string where, params object[] parameters)
+    {
+        return Select<T>(select, "[" + DbTableInfo.GetTableName<T>() + "]", skip, take, orderBy, out totalItemCount, where, parameters);
+    }
+
+    public IEnumerable<T> Select<T>(string select, string tables, int skip, int take, string orderBy, string where, params object[] parameters)
+    {
+        int totalItemCount;
+        return Select<T>(select, tables, skip, take, orderBy, out totalItemCount, where, parameters);
+    }
+
+    public IEnumerable<T> Select<T>(string select, string tables, int skip, int take, string orderBy, out int totalItemCount, string where, params object[] parameters)
+    {
+        where = (string.IsNullOrWhiteSpace(where) ? string.Empty : ("WHERE " + where));
+        string commandText = $"SELECT COUNT(*) FROM {tables} {where}";
+        totalItemCount = ExecuteScalar<int>(commandText, parameters);
+        int value = take + skip;
+        commandText = $"SELECT * FROM (SELECT {select}, ROW_NUMBER() OVER (ORDER BY {orderBy}) AS db_rowNumber FROM {tables} {where}) AS tbl WHERE db_rowNumber > {skip} AND db_rowNumber <= {value} ORDER BY db_rowNumber";
+        SqlCommand sqlCommand = getCommand(commandText, parameters);
+        return ParseResult<T>(sqlCommand);
+    }
+
+    public IEnumerable<T> SelectSingleCol<T>(string command, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(command, parameters);
+        List<T> list = new List<T>();
+        using SqlDataReader sqlDataReader = sqlCommand.ExecuteReader();
+        while (sqlDataReader.Read())
+        {
+            list.Add((T)sqlDataReader[0]);
+        }
+
+        return list;
+    }
+
+    public IReadOnlyDictionary<T1, T2> SelectDictionary<T1, T2>(string command, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(command, parameters);
+        Dictionary<T1, T2> dictionary = new Dictionary<T1, T2>();
+        using SqlDataReader sqlDataReader = sqlCommand.ExecuteReader();
+        while (sqlDataReader.Read())
+        {
+            dictionary.Add((T1)sqlDataReader[0], (T2)sqlDataReader[1]);
+        }
+
+        return dictionary;
+    }
+
+    public IEnumerable<T2> SelectSingleCol<T, T2>(string colname, string where, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(string.Format("SELECT [{0}] FROM [{1}] {2}", colname, DbTableInfo.GetTableName(typeof(T)), (where.Length == 0) ? string.Empty : (" WHERE " + where)), parameters);
+        List<T2> list = new List<T2>();
+        using SqlDataReader sqlDataReader = sqlCommand.ExecuteReader();
+        while (sqlDataReader.Read())
+        {
+            list.Add((T2)sqlDataReader[colname]);
+        }
+
+        return list;
+    }
+
+    public SqlDataReader ExecuteReader(string commandText, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(commandText, parameters);
+        try
+        {
+            _ = IsDebug;
+            return sqlCommand.ExecuteReader();
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, sqlCommand);
+        }
+    }
+
+    public int ExecuteNonQuery(string commandText, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(commandText, parameters);
+        try
+        {
+            _ = IsDebug;
+            return sqlCommand.ExecuteNonQuery();
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, sqlCommand);
+        }
+    }
+
+    public Task<int> ExecuteNonQueryAsync(string commandText, params object[] parameters)
+    {
+        SqlCommand sqlCommand = getCommand(commandText, parameters);
+        try
+        {
+            _ = IsDebug;
+            return sqlCommand.ExecuteNonQueryAsync();
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, sqlCommand);
+        }
+    }
+
+    public T ExecuteScalar<T>(string commandText, params object[] parameters)
+    {
+        if (parameters != null && parameters.Length == 1 && parameters[0] == null)
+        {
+            parameters = new object[0];
+        }
+
+        SqlCommand sqlCommand = getCommand(commandText, parameters);
+        try
+        {
+            _ = IsDebug;
+            object obj = sqlCommand.ExecuteScalar();
+            return (obj == DBNull.Value || obj == null) ? default(T) : ((T)obj);
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, sqlCommand);
+        }
+    }
+
+    public async Task<T> ExecuteScalarAsync<T>(string commandText, params object[] parameters)
+    {
+        if (parameters != null && parameters.Length == 1 && parameters[0] == null)
+        {
+            parameters = new object[0];
+        }
+
+        SqlCommand command = getCommand(commandText, parameters);
+        try
+        {
+            _ = IsDebug;
+            object obj = await command.ExecuteScalarAsync();
+            return (obj == DBNull.Value || obj == null) ? default(T) : ((T)obj);
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, command);
+        }
+    }
+
+    public SqlCommand GetCommand()
+    {
+        return getCommand(string.Empty);
+    }
+
+    public SqlCommand GetCommand(string commandText, params object[] parameters)
+    {
+        return getCommand(commandText, parameters);
+    }
+
+    public static void Using(DbContext context, Action<DbContext> action)
+    {
+        Using(context, delegate (DbContext actualContext)
+        {
+            action(actualContext);
+            return (object)null;
+        });
+    }
+
+    public static T Using<T>(DbContext context, Func<DbContext, T> func)
+    {
+        if (context == null)
+        {
+            using (context = new DbContext())
+            {
+                return func(context);
+            }
+        }
+
+        return func(context);
+    }
+
+    public static void Using(Action<DbContext> action)
+    {
+        Using(delegate (DbContext context)
+        {
+            action(context);
+            return (object)null;
+        });
+    }
+
+    public static T Using<T>(Func<DbContext, T> func)
+    {
+        using DbContext arg = new DbContext();
+        return func(arg);
+    }
+
+    public async Task<IEnumerable<T>> ParseResultAsync<T>(string commandText, params object[] parameters)
+    {
+        return await ParseResultAsync<T>(shouldRunGetCommands: true, commandText, parameters);
+    }
+
+    public async Task<IEnumerable<T>> ParseResultAsync<T>(bool shouldRunGetCommands, string commandText, params object[] parameters)
+    {
+        return await ParseResultAsync<T>(GetCommand(commandText, parameters), shouldRunGetCommands);
+    }
+
+    public async Task<IEnumerable<T>> ParseResultAsync<T>(SqlCommand command, bool shouldRunGetCommands = true)
+    {
+        return (await ParseResultAsync(typeof(T), command, shouldRunGetCommands)).Cast<T>();
+    }
+
+    public async Task<IEnumerable> ParseResultAsync(Type type, SqlCommand command, bool shouldRunGetCommands = true)
+    {
+        Task<SqlDataReader> task = command.ExecuteReaderAsync();
+        List<object> result = new List<object>();
+        Dictionary<MemberInfo, DbGetCommand> getCommands = getDbGetCommands(type);
+        Dictionary<string, MemberInfo> propAliases = getPropertyAliases(getColumnInfo(type, includeDbIngore: true));
+        _ = IsDebug;
+        using (SqlDataReader reader = await task)
+        {
+            new List<Task<bool>>();
+            while (await reader.ReadAsync())
+            {
+                object item = parseSingleResult(type, propAliases, reader);
+                result.Add(item);
+            }
+        }
+
+        if (getCommands.Any() && shouldRunGetCommands)
+        {
+            runGetCommands(result, getCommands);
+        }
+
+        return result;
+    }
+
+    public IEnumerable<T> ParseResult<T>(string commandText, params object[] parameters)
+    {
+        return ParseResult<T>(shouldRunGetCommands: true, commandText, parameters);
+    }
+
+    public IEnumerable<T> ParseResult<T>(bool shouldRunGetCommands, string commandText, params object[] parameters)
+    {
+        return ParseResult<T>(GetCommand(commandText, parameters), shouldRunGetCommands);
+    }
+
+    public IEnumerable<T> ParseResult<T>(SqlCommand command, bool shouldRunGetCommands = true)
+    {
+        return ParseResult(typeof(T), command, shouldRunGetCommands).Cast<T>();
+    }
+
+    public IEnumerable ParseResult(Type type, SqlCommand command, bool shouldRunGetCommands = true)
+    {
+        List<object> list = new List<object>();
+        Dictionary<MemberInfo, DbGetCommand> dbGetCommands = getDbGetCommands(type);
+        Dictionary<string, MemberInfo> propertyAliases = getPropertyAliases(getColumnInfo(type, includeDbIngore: true));
+        _ = IsDebug;
+        using (SqlDataReader sqlDataReader = command.ExecuteReader())
+        {
+            while (sqlDataReader.Read())
+            {
+                object item = parseSingleResult(type, propertyAliases, sqlDataReader);
+                list.Add(item);
+            }
+        }
+
+        if (dbGetCommands.Any() && shouldRunGetCommands)
+        {
+            runGetCommands(list, dbGetCommands);
+        }
+
+        return list;
+    }
+
+    public T ParseSingleResult<T>(SqlDataReader reader)
+    {
+        Dictionary<MemberInfo, DbGetCommand> dbGetCommands = getDbGetCommands(typeof(T));
+        Dictionary<string, MemberInfo> propAliases = getColumnInfo(typeof(T), includeDbIngore: true).ToDictionary((KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Value.Name, (KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Key);
+        T result = parseSingleResult<T>(propAliases, reader);
+        if (dbGetCommands.Any())
+        {
+            runGetCommands(result, dbGetCommands);
+        }
+
+        return result;
+    }
+
+    private void runGetCommands<T>(List<T> result, Dictionary<MemberInfo, DbGetCommand> getCommands)
+    {
+        foreach (T item in result)
+        {
+            runGetCommands(item, getCommands);
+        }
+    }
+
+    private void runGetCommands<T>(T result, Dictionary<MemberInfo, DbGetCommand> getCommands)
+    {
+        if (getCommands.Count == 0)
+        {
+            return;
+        }
+
+        SqlCommand sqlCommand = getCommand(string.Empty);
+        MemberInfo[] privateProtectedAndPublicMembers = result.GetType().GetPrivateProtectedAndPublicMembers();
+        foreach (MemberInfo obj in privateProtectedAndPublicMembers)
+        {
+            string name = obj.Name;
+            object value = obj.GetValue(result) ?? DBNull.Value;
+            sqlCommand.Parameters.AddWithValue("@" + name, value);
+        }
+
+        foreach (KeyValuePair<MemberInfo, DbGetCommand> getCommand in getCommands)
+        {
+            sqlCommand.CommandText = getCommand.Value.Command;
+            Type memberType = getCommand.Key.GetMemberType();
+            if (isEnumerableType(memberType))
+            {
+                Type type = memberType.GenericTypeArguments.First();
+                IList list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(type));
+                foreach (object item in ParseResult(type, sqlCommand, shouldRunGetCommands: false))
+                {
+                    list.Add(item);
+                }
+
+                getCommand.Key.SetValue(result, list);
+            }
+            else
+            {
+                object databaseValue = sqlCommand.ExecuteScalar();
+                object csharpValueFromDatabaseValue = getCsharpValueFromDatabaseValue(databaseValue, getCommand.Key);
+                getCommand.Key.SetValue(result, csharpValueFromDatabaseValue);
+            }
+        }
+    }
+
+    private Exception BuildDbException(SqlException e, SqlCommand command)
+    {
+        Dictionary<string, object> parameters = command.Parameters.Cast<SqlParameter>().ToDictionary((SqlParameter x) => x.ParameterName, (SqlParameter x) => x.Value);
+        return new DbException(e, command.CommandText, parameters);
+    }
+
+    private static bool isEnumerableType(Type type)
+    {
+        if (type.IsGenericType)
+        {
+            return type.GetGenericTypeDefinition() == typeof(IEnumerable<>);
+        }
+
+        return false;
+    }
+
+    private static Type getEnumerableType(Type type)
+    {
+        Type[] interfaces = type.GetInterfaces();
+        foreach (Type type2 in interfaces)
+        {
+            if (isEnumerableType(type2))
+            {
+                return type2.GetGenericArguments()[0];
+            }
+        }
+
+        return type;
+    }
+
+    private SqlCommand getCommand(string commandText, params object[] parameters)
+    {
+        command.CommandText = commandText;
+        command.Parameters.Clear();
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            command.Parameters.AddWithValue("@" + i, parameters[i] ?? DBNull.Value);
+        }
+
+        return command;
+    }
+
+    private void parseForSQL<T>(SqlCommand command, T obj)
+    {
+        new List<T>();
+        getColumnInfo(typeof(T), includeDbIngore: false);
+        Dictionary<string, string> dictionary = getColumnNames(typeof(T), includeDbIngore: false).ToDictionary((KeyValuePair<string, string> x) => x.Value, (KeyValuePair<string, string> x) => x.Key);
+        _ = IsDebug;
+        using SqlDataReader sqlDataReader = command.ExecuteReader();
+        while (sqlDataReader.Read())
+        {
+            for (int i = 0; i < sqlDataReader.FieldCount; i++)
+            {
+                if (!sqlDataReader.GetName(i).StartsWith("db_"))
+                {
+                    object value = ((sqlDataReader[i] == DBNull.Value) ? null : sqlDataReader[i]);
+                    MemberInfo memberInfo = typeof(T).GetMember(dictionary[sqlDataReader.GetName(i)]).Single();
+                    DbColumnInfo customAttribute = memberInfo.GetCustomAttribute<DbColumnInfo>(inherit: true);
+                    if (customAttribute != null && customAttribute.ValueConverterInstance != null)
+                    {
+                        value = customAttribute.ValueConverterInstance.Convert(value);
+                    }
+
+                    memberInfo.SetValue(obj, value);
+                }
+            }
+        }
+    }
+
+    private Dictionary<string, MemberInfo> getPropertyAliases(Dictionary<MemberInfo, DbColumnInfo> columnInfo)
+    {
+        Dictionary<string, MemberInfo> dictionary = new Dictionary<string, MemberInfo>();
+        foreach (KeyValuePair<MemberInfo, DbColumnInfo> item in columnInfo.OrderBy((KeyValuePair<MemberInfo, DbColumnInfo> x) => !x.Value.AutoGenerated))
+        {
+            if (dictionary.ContainsKey(item.Value.Name))
+            {
+                dictionary[item.Value.Name] = item.Key;
+            }
+            else
+            {
+                dictionary.Add(item.Value.Name, item.Key);
+            }
+        }
+
+        return dictionary;
+    }
+
+    private T parseSingleResult<T>(Dictionary<string, MemberInfo> propAliases, SqlDataReader reader)
+    {
+        return (T)parseSingleResult(typeof(T), propAliases, reader);
+    }
+
+    private object parseSingleResult(Type type, Dictionary<string, MemberInfo> propAliases, SqlDataReader reader)
+    {
+        try
+        {
+            object obj = (isEnumerableType(type) ? new List<object>() : FormatterServices.GetUninitializedObject(type));
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                if (!reader.GetName(i).StartsWith("db_") && propAliases.TryGetValue(reader.GetName(i), out var value))
+                {
+                    if ((object)Nullable.GetUnderlyingType(value.GetMemberType()) == null)
+                    {
+                        value.GetMemberType();
+                    }
+
+                    object csharpValueFromDatabaseValue = getCsharpValueFromDatabaseValue(reader[i], value);
+                    value.SetValue(obj, csharpValueFromDatabaseValue);
+                }
+            }
+
+            return obj;
+        }
+        catch (SqlException e)
+        {
+            throw BuildDbException(e, command);
+        }
+    }
+
+    private object getCsharpValueFromDatabaseValue(object databaseValue, MemberInfo propInfo)
+    {
+        object obj = ((databaseValue == DBNull.Value) ? null : databaseValue);
+        DbColumnInfo customAttribute = propInfo.GetCustomAttribute<DbColumnInfo>(inherit: true);
+        if (customAttribute != null && customAttribute.ValueConverterInstance != null)
+        {
+            obj = customAttribute.ValueConverterInstance.Convert(obj);
+        }
+
+        return obj;
+    }
+
+    private Dictionary<MemberInfo, DbGetCommand> getDbGetCommands(Type type)
+    {
+        Dictionary<MemberInfo, DbGetCommand> dictionary = new Dictionary<MemberInfo, DbGetCommand>();
+        MemberInfo[] privateProtectedAndPublicMembers = type.GetPrivateProtectedAndPublicMembers();
+        foreach (MemberInfo memberInfo in privateProtectedAndPublicMembers)
+        {
+            DbGetCommand customAttribute = memberInfo.GetCustomAttribute<DbGetCommand>(inherit: true);
+            if (customAttribute != null)
+            {
+                dictionary.Add(memberInfo, customAttribute);
+            }
+        }
+
+        return dictionary;
+    }
+
+    private static Dictionary<MemberInfo, DbColumnInfo> getColumnInfo(Type type, bool includeDbIngore)
+    {
+        Dictionary<MemberInfo, DbColumnInfo> dictionary = new Dictionary<MemberInfo, DbColumnInfo>();
+        foreach (MemberInfo item in from x in type.GetPrivateProtectedAndPublicMembers()
+                                    where includeDbIngore || !DbIgnore.ShouldMemberBeIgnored(x)
+                                    select x)
+        {
+            DbColumnInfo dbColumnInfo = item.GetCustomAttribute<DbColumnInfo>(inherit: true) ?? new DbColumnInfo(item.Name, AutoGenerated: true);
+            if (string.IsNullOrWhiteSpace(dbColumnInfo.Name))
+            {
+                dbColumnInfo.Name = item.Name;
+            }
+
+            dictionary.Add(item, dbColumnInfo);
+        }
+
+        return dictionary;
+    }
+
+    private Dictionary<string, string> getColumnNames(Type type, bool includeDbIngore)
+    {
+        return getColumnInfo(type, includeDbIngore).ToDictionary((KeyValuePair<MemberInfo, DbColumnInfo> x) => x.Key.Name, (KeyValuePair<MemberInfo, DbColumnInfo> x) => (x.Value == null || x.Value.Name == null) ? x.Key.Name : x.Value.Name);
+    }
+
+    private static Dictionary<MemberInfo, DbPrimaryKey> getPrimaryKeys(Type type)
+    {
+        Dictionary<MemberInfo, DbPrimaryKey> dictionary = new Dictionary<MemberInfo, DbPrimaryKey>();
+        MemberInfo[] privateProtectedAndPublicMembers = type.GetPrivateProtectedAndPublicMembers();
+        foreach (MemberInfo memberInfo in privateProtectedAndPublicMembers)
+        {
+            DbPrimaryKey customAttribute = memberInfo.GetCustomAttribute<DbPrimaryKey>(inherit: true);
+            if (customAttribute != null)
+            {
+                dictionary.Add(memberInfo, customAttribute);
+            }
+        }
+
+        return dictionary;
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Transaction != null && CommitOnDispose)
+            {
+                Transaction.Commit();
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ex.Message != "This SqlTransaction has completed; it is no longer usable.")
+            {
+                throw;
+            }
+        }
+
+        command.Dispose();
+        Connection.Dispose();
+        GC.SuppressFinalize(this);
+    }
+}
+
