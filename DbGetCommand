@@ -1,0 +1,24 @@
+using System;
+
+namespace Diviso.Database.Attributes;
+
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = false, Inherited = true)]
+public class DbGetCommand : Attribute
+{
+    public string Command { get; set; }
+
+    public DbGetCommand(string Command)
+    {
+        this.Command = Command;
+    }
+
+    public DbGetCommand(Type TargetType, string where = null)
+        : this("SELECT * FROM " + DbTableInfo.GetTableName(TargetType) + " " + ((!string.IsNullOrWhiteSpace(where)) ? ("WHERE " + where) : string.Empty))
+    {
+    }
+
+    public DbGetCommand(string select, Type TargetType, string where = null)
+        : this($"SELECT {select} FROM {DbTableInfo.GetTableName(TargetType)} {((!string.IsNullOrWhiteSpace(where)) ? ("WHERE " + where) : string.Empty)}")
+    {
+    }
+}
