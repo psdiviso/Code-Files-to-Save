@@ -1,0 +1,18 @@
+using System;
+
+namespace Diviso.Database.Attributes;
+
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = false, Inherited = true)]
+public class DbPrimaryKey : Attribute
+{
+    public bool AutoIncrement { get; set; }
+
+    public DbPrimaryKey()
+    {
+    }
+
+    public DbPrimaryKey(bool AutoIncrement)
+    {
+        this.AutoIncrement = AutoIncrement;
+    }
+}
