@@ -1,0 +1,20 @@
+ public class UIAction : IDisposable
+ {
+     public VisualElement Element { get; }
+
+     public UIAction(VisualElement Element)
+     {
+         this.Element = Element;
+     }
+
+     public async Task StartAsync()
+     {
+         this.Element.IsEnabled = false;
+         await Task.Yield();
+     }
+
+     public void Dispose()
+     {
+         this.Element.IsEnabled = true;
+     }
+ }
