@@ -1,0 +1,159 @@
+   public class WebContext
+   {
+       private static HttpClient client = new HttpClient();
+       public Task Get<T>(string url, Action<T> successCallback, Action<Exception> failureCallback, bool useBaseUrl, bool useToken, UIAction action) => Get<T>(url, successCallback, failureCallback, useBaseUrl, useToken).ContinueWith(x => MainThread.InvokeOnMainThreadAsync(action.Dispose));
+       public Task Post<T1, T2>(string url, T1 data, Action<T2> successCallback, Action<Exception, string> failureCallback, bool useBaseUrl, bool useToken, UIAction action) => Post<T1, T2>(url, data, successCallback, failureCallback, useBaseUrl, useToken).ContinueWith(x => MainThread.InvokeOnMainThreadAsync(action.Dispose));
+
+       public Task Get<T>(string url, Action<T> successCallback, Action<Exception> failureCallback, bool useBaseUrl, bool useToken)
+       {
+           client.DefaultRequestHeaders.Accept.Clear();
+           client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+           if (useToken && Preferences.ContainsKey("AccessToken"))
+           {
+               client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Preferences.Get("AccessToken", ""));
+           }
+
+           if (useBaseUrl)
+               url = Constants.baseUrl + url;
+
+           Debug.WriteLine("Get: " + url);
+           return client.GetAsync(url).ContinueWith(async x =>
+           {
+               if (x.IsFaulted)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   failureCallback(Connectivity.Current.NetworkAccess != NetworkAccess.Internet
+                       ? new Exception("Du skal have en aktiv internet forbindelse, for at benytte denne app.")
+                       : x.Exception);
+               }
+               else if (x.IsCanceled)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   failureCallback(new Exception("Vi er i gang med at opdatere vores servere, prøv venligst tilbage senere."));
+               }
+               else if (!x.Result.IsSuccessStatusCode)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   HttpException ex = new HttpException(x.Result);
+                   failureCallback(new Exception("Vi er i gang med at opdatere vores servere, prøv venligst tilbage senere."));
+               }
+               else
+               {
+                   try
+                   {
+                       string json = await x.Result.Content.ReadAsStringAsync();
+                       Debug.WriteLine("Response: " + json);
+                       var result = JsonConvert.DeserializeObject<T>(json);
+                       successCallback(result);
+                   }
+                   catch (Exception ex)
+                   {
+					CustomErrorService.LogErrorElmah(ex);
+					failureCallback(ex);
+                   }
+               }
+           });
+       }
+
+       public Task Post<T1, T2>(string url, T1 data, Action<T2> successCallback, Action<Exception, string> failureCallback, bool useBaseUrl, bool useToken)
+       {
+           client.DefaultRequestHeaders.Accept.Clear();
+           var json = data == null ? String.Empty : JsonConvert.SerializeObject(data);
+           var content = new StringContent(json, Encoding.UTF8, "application/json");
+           if (useToken && Preferences.ContainsKey("AccessToken"))
+           {
+               client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Preferences.Get("AccessToken", ""));
+           }
+
+           if (useBaseUrl)
+               url = Constants.baseUrl + url;
+
+           Debug.WriteLine("Post: " + url);
+           Debug.WriteLine("Data: " + json);
+           return client.PostAsync(url, content).ContinueWith(async x =>
+           {
+               if (x.IsFaulted)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   failureCallback(x.Exception, url);
+               }
+               else if (x.IsCanceled)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   failureCallback(null, url);
+               }
+               else if (!x.Result.IsSuccessStatusCode)
+               {
+                   UserDialogs.Instance.HideLoading();
+                   HttpException ex = new HttpException(x.Result);
+                   failureCallback(new Exception(ex.Message), url);
+               }
+               else
+               {
+                   try
+                   {
+                       json = await x.Result.Content.ReadAsStringAsync();
+                       Debug.WriteLine("Response: " + json);
+                       var result = JsonConvert.DeserializeObject<T2>(json);
+                       successCallback(result);
+                   }
+                   catch (Exception ex)
+                   {
+					CustomErrorService.LogErrorElmah(ex);
+					failureCallback(ex, url);
+                   }
+               }
+           });
+       }
+
+       public async Task<T1> GetAsync<T1>(string url, bool useBaseUrl, bool useToken)
+       {
+           T1 rtnValue = default(T1);
+           client.DefaultRequestHeaders.Accept.Clear();
+           client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+           if (useToken && Preferences.ContainsKey("AccessToken"))
+           {
+               client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Preferences.Get("AccessToken", ""));
+           }
+
+           if (useBaseUrl)
+               url = Constants.baseUrl + url;
+
+           Debug.WriteLine("Url: " + url);
+           HttpResponseMessage result = await client.GetAsync(url);
+           if (result.IsSuccessStatusCode)
+           {
+               string responseJson = await result.Content.ReadAsStringAsync();
+               Debug.WriteLine("Response: " + responseJson);
+               rtnValue = JsonConvert.DeserializeObject<T1>(responseJson);
+           }
+           return rtnValue;
+       }
+
+       public async Task<T2> PostAsync<T1, T2>(string url, T1 data, bool useBaseUrl, bool useToken)
+       {
+           T2 rtnValue = default(T2);
+           client.DefaultRequestHeaders.Accept.Clear();
+           var json = data == null ? String.Empty : JsonConvert.SerializeObject(data);
+           var content = new StringContent(json, Encoding.UTF8, "application/json");
+           if (useToken && Preferences.ContainsKey("AccessToken"))
+           {
+               client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Preferences.Get("AccessToken", ""));
+           }
+
+           if (useBaseUrl)
+               url = Constants.baseUrl + url;
+
+           Debug.WriteLine("Post: " + url);
+           Debug.WriteLine("Data: " + json);
+
+           HttpResponseMessage result = await client.PostAsync(url, content);
+           if (result.IsSuccessStatusCode)
+           {
+               string responseJson = await result.Content.ReadAsStringAsync();
+               Debug.WriteLine("Response: " + responseJson);
+               rtnValue = JsonConvert.DeserializeObject<T2>(responseJson);
+           }
+           return rtnValue;
+       }
+   }
