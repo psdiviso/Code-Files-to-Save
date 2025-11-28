@@ -1,0 +1,28 @@
+    static MauiAppBuilder ConfigureElmah(this MauiAppBuilder builder)
+    {
+        builder.Logging.AddElmahIo(options =>
+        {
+            options.ApiKey = "f22a90b470154a739cd3e785a1fdef25";
+            options.LogId = new Guid("d6e1f403-cf9c-4ef4-93ef-439566393473");
+            options.OnMessage = msg =>
+            {
+                msg.Hostname = DeviceInfo.Manufacturer + " - " + DeviceInfo.Current.Model;
+                msg.Application = AppInfo.Current.PackageName;
+                msg.Version = AppInfo.Current.VersionString;
+                msg.Category = DeviceInfo.Current.Platform == DevicePlatform.Android ? "Android" : "IOS";
+                msg.User = $"API TOKEN: {Preferences.Get("Token", "NO API TOKEN REGISTERED")}";
+            };
+        });
+        return builder;
+    }
+
+
+    public void SetupElmahLogging()
+    {
+        AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
+        {
+            Exception exception = (Exception)args.ExceptionObject;
+            _logger.LogError(exception, exception.GetBaseException().Message);
+            Task.Delay(1000).Wait();
+        };
+    }
