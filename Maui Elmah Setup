@@ -2,8 +2,8 @@
     {
         builder.Logging.AddElmahIo(options =>
         {
-            options.ApiKey = "f22a90b470154a739cd3e785a1fdef25";
-            options.LogId = new Guid("d6e1f403-cf9c-4ef4-93ef-439566393473");
+            options.ApiKey = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+            options.LogId = new Guid("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
             options.OnMessage = msg =>
             {
                 msg.Hostname = DeviceInfo.Manufacturer + " - " + DeviceInfo.Current.Model;
